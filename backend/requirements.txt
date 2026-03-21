@@ -2,4 +2,9 @@ fastapi
 uvicorn
 pydantic
 python-multipart
+python-dotenv
 replicate
+pillow
+requests
+rembg
+onnxruntime
