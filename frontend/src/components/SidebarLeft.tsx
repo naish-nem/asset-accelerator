@@ -1,6 +1,7 @@
 'use client';
 import { useState } from 'react';
 import { Layers, Wand2, Loader2 } from 'lucide-react';
+import { API_BASE } from '@/lib/api';
 
 export default function SidebarLeft({ isGenerating, setIsGenerating, setGeneratedImageUrl }: any) {
   const [prompt, setPrompt] = useState("");
@@ -10,7 +11,7 @@ export default function SidebarLeft({ isGenerating, setIsGenerating, setGenerate
     setIsGenerating(true);
     setGeneratedImageUrl(null);
     try {
-      const res = await fetch("http://localhost:8000/generate", {
+      const res = await fetch(`${API_BASE}/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt, style_preset: "Isometric Game Asset" })

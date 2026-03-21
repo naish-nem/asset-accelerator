@@ -1,20 +1,74 @@
 'use client';
-import { Download, Package, Loader2 } from 'lucide-react';
+import { Download, Package, Loader2, Upload } from 'lucide-react';
 
-export default function SidebarRight({ extractedAssets = [], isExtracting }: any) {
+export type SidebarRightProps = {
+  extractedAssets?: { id: number; url: string; name: string }[];
+  isExtracting?: boolean;
+  selectedForUnityIds?: number[];
+  onToggleUnitySelect?: (id: number) => void;
+  onSelectAllForUnity?: () => void;
+  onSelectNoneForUnity?: () => void;
+  onImportSelectedToUnity?: () => void;
+  isUnityImporting?: boolean;
+};
+
+export default function SidebarRight({
+  extractedAssets = [],
+  isExtracting,
+  selectedForUnityIds = [],
+  onToggleUnitySelect,
+  onSelectAllForUnity,
+  onSelectNoneForUnity,
+  onImportSelectedToUnity,
+  isUnityImporting,
+}: SidebarRightProps) {
   const downloadAll = () => {
     extractedAssets.forEach((asset, i) => {
-      const a = document.createElement("a");
+      const a = document.createElement('a');
       a.href = asset.url;
       a.download = `extracted_obj_${i}.png`;
       a.click();
     });
   };
 
+  const selectedCount = selectedForUnityIds.length;
+
   return (
     <aside className="panel panel-right">
       <div className="panel-header">
-        Extracted Assets
+        <span>Extracted Assets</span>
+        {extractedAssets.length > 0 && (
+          <span style={{ display: 'flex', gap: '0.75rem', fontSize: '0.7rem', fontWeight: 500, textTransform: 'none' }}>
+            <button
+              type="button"
+              onClick={onSelectAllForUnity}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: 'var(--accent)',
+                cursor: 'pointer',
+                padding: 0,
+                width: 'auto',
+              }}
+            >
+              Select all
+            </button>
+            <button
+              type="button"
+              onClick={onSelectNoneForUnity}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: 'var(--text-secondary)',
+                cursor: 'pointer',
+                padding: 0,
+                width: 'auto',
+              }}
+            >
+              Clear
+            </button>
+          </span>
+        )}
       </div>
       <div className="panel-content">
         {extractedAssets.length === 0 && !isExtracting && (
@@ -24,23 +78,82 @@ export default function SidebarRight({ extractedAssets = [], isExtracting }: any
             <p style={{ fontSize: '0.75rem', marginTop: '0.5rem', opacity: 0.7 }}>Draw a box over objects on the canvas to segment them.</p>
           </div>
         )}
-        
+
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
-          {extractedAssets.map((asset: any) => (
-            <div key={asset.id} style={{ border: '1px solid var(--border-color)', borderRadius: '6px', overflow: 'hidden', padding: '0.5rem', textAlign: 'center', backgroundColor: '#22262d' }}>
-              <img src={asset.url} alt="Extracted" style={{ width: '100%', height: '80px', objectFit: 'contain' }} />
-              <div style={{ fontSize: '0.75rem', marginTop: '0.5rem', color: 'var(--text-secondary)' }}>{asset.name}</div>
-            </div>
-          ))}
+          {extractedAssets.map((asset: any) => {
+            const checked = selectedForUnityIds.includes(asset.id);
+            return (
+              <div
+                key={asset.id}
+                style={{
+                  border: '1px solid var(--border-color)',
+                  borderRadius: '6px',
+                  overflow: 'hidden',
+                  padding: '0.5rem',
+                  textAlign: 'center',
+                  backgroundColor: '#22262d',
+                  position: 'relative',
+                }}
+              >
+                <label
+                  style={{
+                    position: 'absolute',
+                    top: 6,
+                    left: 6,
+                    zIndex: 2,
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => onToggleUnitySelect?.(asset.id)}
+                    style={{ width: '1rem', height: '1rem', accentColor: 'var(--accent)' }}
+                  />
+                </label>
+                <img src={asset.url} alt="Extracted" style={{ width: '100%', height: '80px', objectFit: 'contain' }} />
+                <div style={{ fontSize: '0.75rem', marginTop: '0.5rem', color: 'var(--text-secondary)' }}>{asset.name}</div>
+              </div>
+            );
+          })}
           {isExtracting && (
-            <div style={{ border: '1px solid var(--accent)', borderRadius: '6px', overflow: 'hidden', padding: '0.5rem', textAlign: 'center', backgroundColor: '#22262d', display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100px' }}>
+            <div
+              style={{
+                border: '1px solid var(--accent)',
+                borderRadius: '6px',
+                overflow: 'hidden',
+                padding: '0.5rem',
+                textAlign: 'center',
+                backgroundColor: '#22262d',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                height: '100px',
+              }}
+            >
               <Loader2 className="animate-spin" style={{ color: 'var(--accent)' }} size={24} />
             </div>
           )}
         </div>
       </div>
-      <div style={{ padding: '1rem', borderTop: '1px solid var(--border-color)' }}>
-        <button onClick={downloadAll} disabled={extractedAssets.length === 0}>
+      <div style={{ padding: '1rem', borderTop: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+        <button
+          type="button"
+          onClick={onImportSelectedToUnity}
+          disabled={extractedAssets.length === 0 || selectedCount === 0 || isUnityImporting}
+        >
+          {isUnityImporting ? (
+            <Loader2 className="animate-spin" size={16} />
+          ) : (
+            <Upload size={16} />
+          )}
+          {isUnityImporting
+            ? 'Importing to Unity…'
+            : `Import selected to Unity${selectedCount > 0 ? ` (${selectedCount})` : ''}`}
+        </button>
+        <button type="button" onClick={downloadAll} disabled={extractedAssets.length === 0}>
           <Download size={16} /> Export All (PNGs)
         </button>
       </div>
