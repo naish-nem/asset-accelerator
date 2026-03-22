@@ -8,5 +8,4 @@ pillow
 requests
 rembg
 onnxruntime
-gradio_client
 httpx

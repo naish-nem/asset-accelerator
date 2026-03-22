@@ -81,7 +81,11 @@ export default function Home() {
         throw new Error(msg || '3D conversion failed');
       }
       const items = (data as {
-        items?: { glb_base64: string; glb_byte_length?: number }[];
+        items?: {
+          glb_base64: string;
+          glb_byte_length?: number;
+          texture_applied?: boolean;
+        }[];
       }).items;
       if (!items || items.length !== pngOnly.length) {
         throw new Error('Unexpected response from 3D conversion');
@@ -98,6 +102,14 @@ export default function Home() {
         }
         glbById.set(a.id, b64);
       });
+      const textureById = new Map<number, boolean>();
+      pngOnly.forEach((a, i) => {
+        textureById.set(a.id, Boolean(items[i]?.texture_applied));
+      });
+      const anyUntextured = pngOnly.some((a, i) => !items[i]?.texture_applied);
+      if (anyUntextured) {
+        console.info('[3D] Some models were returned without textures (check API response).');
+      }
       setExtractedAssets((prev) =>
         prev.map((a) => {
           const glb = glbById.get(a.id);
@@ -107,6 +119,7 @@ export default function Home() {
             url: glb,
             kind: 'glb' as const,
             name: a.name.startsWith('3D ') ? a.name : `3D · ${a.name}`,
+            textureApplied: textureById.get(a.id),
           };
         })
       );

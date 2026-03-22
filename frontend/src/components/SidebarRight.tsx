@@ -7,6 +7,8 @@ export type WorkspaceAsset = {
   url: string;
   name: string;
   kind?: 'image' | 'glb';
+  /** True when the GLB includes textures (Stable Fast 3D returns textured meshes). */
+  textureApplied?: boolean;
 };
 
 export type SidebarRightProps = {
@@ -138,6 +140,18 @@ export default function SidebarRight({
                   )}
                 </div>
                 <div style={{ fontSize: '0.75rem', marginTop: '0.5rem', color: 'var(--text-secondary)' }}>{asset.name}</div>
+                {isGlb && (
+                  <div
+                    style={{
+                      fontSize: '0.65rem',
+                      marginTop: '0.25rem',
+                      color: asset.textureApplied ? 'var(--accent)' : 'var(--text-secondary)',
+                      opacity: 0.9,
+                    }}
+                  >
+                    {asset.textureApplied ? 'Textured (PBR)' : 'Untextured shape'}
+                  </div>
+                )}
               </div>
             );
           })}

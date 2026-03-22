@@ -1,11 +1,10 @@
+import json
+import math
 import os
 import re
-import time
 import base64
 import logging
-import tempfile
 import threading
-import urllib.parse
 
 import httpx
 import requests
@@ -22,7 +21,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 _BACKEND_ENV_PATH = Path(__file__).resolve().parent / ".env"
-# Use override=True so values in backend/.env win over empty shell vars (e.g. export HF_TOKEN=)
+# Use override=True so values in backend/.env win over empty shell vars.
 if _BACKEND_ENV_PATH.is_file():
     load_dotenv(_BACKEND_ENV_PATH, override=True)
 else:
@@ -30,11 +29,12 @@ else:
 
 logger = logging.getLogger(__name__)
 
-HF_3D_SETUP_HINT = (
-    "3D conversion uses Hugging Face ZeroGPU; anonymous requests are blocked. "
-    "Create a token at https://huggingface.co/settings/tokens and add to backend/.env: "
-    "HF_TOKEN=hf_... then restart the API. "
-    "Alternatively run: huggingface-cli login (same machine as the backend)."
+STABILITY_SF3D_URL = "https://api.stability.ai/v2beta/3d/stable-fast-3d"
+
+STABILITY_3D_SETUP_HINT = (
+    "3D conversion uses Stability AI Stable Fast 3D. "
+    "Add your API key to backend/.env: STABILITY_API_KEY=sk-... "
+    "See https://platform.stability.ai/docs/api-reference#tag/3D/paths/~1v2beta~13d~1stable-fast-3d/post"
 )
 
 TTC_COMPRESS_URL = "https://api.thetokencompany.com/v1/compress"
@@ -72,66 +72,32 @@ class Convert3DRequest(BaseModel):
     items: List[Convert3DItem]
 
 
-_hunyuan_client = None
-_hunyuan_lock = threading.Lock()
-_hunyuan_token_used: Optional[str] = None
+_stability_lock = threading.Lock()
 
 
-def _resolve_hf_token() -> Optional[str]:
-    """HF token for Gradio Spaces: env vars, then token from `huggingface-cli login`."""
-    for key in ("HF_TOKEN", "HUGGINGFACE_HUB_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
+class StableFast3DError(Exception):
+    """Raised when Stability returns a non-200 or the body is not a valid GLB."""
+
+    def __init__(self, status_code: int, message: str):
+        self.status_code = status_code
+        super().__init__(message)
+
+
+def _resolve_stability_api_key() -> Optional[str]:
+    for key in ("STABILITY_API_KEY", "STABILITY_AI_API_KEY"):
         raw = os.environ.get(key)
         if raw and raw.strip():
             return raw.strip()
-    try:
-        from huggingface_hub import get_token
-
-        cached = get_token()
-        if cached and cached.strip():
-            return cached.strip()
-    except Exception:
-        pass
     return None
 
 
-def get_hunyuan_client():
-    global _hunyuan_client, _hunyuan_token_used
-
-    hf_token = _resolve_hf_token()
-    if _hunyuan_client is not None and _hunyuan_token_used != hf_token:
-        try:
-            _hunyuan_client.close()
-        except Exception:
-            pass
-        _hunyuan_client = None
-
-    if _hunyuan_client is None:
-        from gradio_client import Client
-
-        if not hf_token:
-            logger.warning(
-                "No Hugging Face token: 3D conversion will fail until HF_TOKEN is set "
-                "or huggingface-cli login is run."
-            )
-        # download_files=False: gradio_client's built-in GET file=/tmp/... often hits HF 500s.
-        _hunyuan_client = Client(
-            "tencent/Hunyuan3D-2.1",
-            hf_token=hf_token,
-            verbose=False,
-            httpx_kwargs={"timeout": 600.0},
-            download_files=False,
-        )
-        _hunyuan_token_used = hf_token
-    return _hunyuan_client
-
-
 @app.on_event("startup")
-def _log_hf_token_status():
-    if _resolve_hf_token():
-        logger.info("Hugging Face token is set; 3D conversion can use ZeroGPU.")
+def _log_stability_config():
+    if _resolve_stability_api_key():
+        logger.info("3D: Stability AI Stable Fast 3D (API key set).")
     else:
         logger.warning(
-            "No Hugging Face token found. Set HF_TOKEN in %s or run huggingface-cli login.",
+            "STABILITY_API_KEY not set — /convert-3d will fail until configured. See %s",
             _BACKEND_ENV_PATH,
         )
 
@@ -150,8 +116,8 @@ def _decode_data_url_png(data_url: str) -> bytes:
 
 def _png_rgba_flattened_on_white(png_bytes: bytes) -> bytes:
     """
-    Hunyuan3D expects a solid photo-style input. RGBA cutouts often read as empty; composite
-    onto white so the model sees opaque pixels.
+    Single-image 3D APIs expect a solid photo-style input. RGBA cutouts often read as empty;
+    composite onto white so the model sees opaque pixels.
     """
     img = Image.open(BytesIO(png_bytes)).convert("RGBA")
     bg = Image.new("RGB", img.size, (255, 255, 255))
@@ -161,141 +127,155 @@ def _png_rgba_flattened_on_white(png_bytes: bytes) -> bytes:
     return out.getvalue()
 
 
-def _file_data_from_shape_result(result: Tuple[Any, ...]) -> dict:
-    if not result:
-        raise ValueError("empty result from Hunyuan3D")
-    first = result[0]
-    if isinstance(first, (list, tuple)) and first:
-        first = first[0]
-    if isinstance(first, dict):
-        inner = first.get("value")
-        if isinstance(inner, dict) and isinstance(inner.get("path"), str):
-            return inner
-        if isinstance(first.get("path"), str):
-            return first
-    raise ValueError(f"unexpected shape_generation file output: {type(first).__name__}")
+def _ensure_png_min_side(png_bytes: bytes, min_side: int = 64) -> bytes:
+    """Stable Fast 3D rejects images smaller than 64px per side."""
+    img = Image.open(BytesIO(png_bytes)).convert("RGB")
+    w, h = img.size
+    if w >= min_side and h >= min_side:
+        return png_bytes
+    scale = max(min_side / w, min_side / h)
+    nw = max(min_side, int(math.ceil(w * scale)))
+    nh = max(min_side, int(math.ceil(h * scale)))
+    resized = img.resize((nw, nh), Image.Resampling.LANCZOS)
+    buf = BytesIO()
+    resized.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
 
 
-def _download_glb_from_space(client: Any, file_data: dict) -> bytes:
-    """Fetch GLB bytes using Space auth; retries + percent-encoded file= fallback."""
-    path = file_data.get("path")
-    root = client.src if str(client.src).endswith("/") else str(client.src) + "/"
-    urls: List[str] = []
-    for u in (file_data.get("url"),):
-        if isinstance(u, str) and u.strip():
-            urls.append(u.strip())
-    if isinstance(path, str) and path:
-        enc = root + "file=" + urllib.parse.quote(path, safe="")
-        if enc not in urls:
-            urls.append(enc)
-        raw = root + "file=" + path
-        if raw not in urls:
-            urls.append(raw)
-
-    if not urls:
-        raise ValueError("no download URL or path in Hunyuan3D file response")
-
-    last_err: Optional[Exception] = None
-    for url in urls:
-        for attempt in range(3):
-            try:
-                r = httpx.get(
-                    url,
-                    headers=client.headers,
-                    cookies=client.cookies,
-                    follow_redirects=True,
-                    timeout=300.0,
-                )
-                r.raise_for_status()
-                body = r.content
-                if len(body) < 100:
-                    raise ValueError("downloaded file too small to be a valid GLB")
-                if body[:4] != b"glTF":
-                    raise ValueError(
-                        "download is not a binary GLB (missing glTF header); "
-                        "Space may have returned an error page"
-                    )
-                return body
-            except Exception as e:
-                last_err = e
-                logger.warning(
-                    "GLB download attempt %s failed for %s: %s",
-                    attempt + 1,
-                    url[:120],
-                    e,
-                )
-                time.sleep(1.0 * (attempt + 1))
-    raise last_err or RuntimeError("GLB download failed")
+def _stability_sf3d_form_extras() -> dict:
+    """Optional multipart fields; see Stability API reference."""
+    extra: dict = {}
+    tr = (os.environ.get("STABILITY_SF3D_TEXTURE_RESOLUTION") or "").strip()
+    if tr in ("512", "1024", "2048"):
+        extra["texture_resolution"] = tr
+    fr = (os.environ.get("STABILITY_SF3D_FOREGROUND_RATIO") or "").strip()
+    if fr:
+        try:
+            v = float(fr)
+            if 0.1 <= v <= 1.0:
+                extra["foreground_ratio"] = fr
+        except ValueError:
+            pass
+    rm = (os.environ.get("STABILITY_SF3D_REMESH") or "").strip().lower()
+    if rm in ("none", "triangle"):
+        extra["remesh"] = rm
+    return extra
 
 
-def _format_3d_upstream_error(exc: BaseException) -> Tuple[int, str]:
-    """Map Gradio/HF errors to HTTP status and a clear detail string."""
-    msg = str(exc).strip() or repr(exc)
-    low = msg.lower()
-    if "unlogged" in low or "zerogpu" in low:
-        return 401, f"{HF_3D_SETUP_HINT} (upstream: {msg})"
-    if "quota" in low and "gpu" in low:
-        return 503, (
-            f"Hugging Face GPU quota exhausted for this account. Try again later or use "
-            f"https://huggingface.co/settings/billing — details: {msg}"
-        )
-    if "quota" in low:
-        return 503, msg
-    return 502, f"3D service error: {msg}"
+def _glb_bytes_from_stability_response(response: httpx.Response) -> bytes:
+    body = response.content
+    if len(body) >= 4 and body[:4] == b"glTF":
+        return body
+    ct = (response.headers.get("content-type") or "").lower()
+    if "application/json" in ct or body.lstrip().startswith(b"{"):
+        try:
+            obj = response.json()
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Stable Fast 3D returned non-GLB body: {e}") from e
+        arts = obj.get("artifacts")
+        if isinstance(arts, list) and arts:
+            first = arts[0]
+            if isinstance(first, dict):
+                b64 = first.get("base64")
+                if isinstance(b64, str) and b64.strip():
+                    raw = base64.b64decode(b64)
+                    if len(raw) >= 4 and raw[:4] == b"glTF":
+                        return raw
+        errs = obj.get("errors")
+        if isinstance(errs, list) and errs:
+            raise ValueError("; ".join(str(x) for x in errs))
+        if isinstance(obj.get("name"), str) and obj.get("name") == "bad_request":
+            raise ValueError(str(obj))
+        raise ValueError("Stable Fast 3D JSON response had no GLB artifact")
+    raise ValueError(
+        "Stable Fast 3D response was not a GLB (expected glTF header or JSON with artifacts)"
+    )
 
 
-def png_data_url_to_glb_data_url(data_url: str) -> Tuple[str, Optional[Any], int]:
-    """Call Tencent Hunyuan3D-2.1 /shape_generation; returns (glb data URL, mesh_stats, glb_len)."""
+def _format_stability_http_error(response: httpx.Response) -> Tuple[int, str]:
+    detail = response.text.strip() or response.reason_phrase
+    try:
+        obj = response.json()
+        errs = obj.get("errors")
+        if isinstance(errs, list) and errs:
+            detail = "; ".join(str(x) for x in errs)
+    except Exception:
+        pass
+    code = response.status_code
+    if code == 401:
+        return 401, f"{STABILITY_3D_SETUP_HINT} (HTTP {code}: {detail})"
+    if code == 402:
+        return 402, f"Stability AI billing / credits: {detail}"
+    if code == 403:
+        return 403, f"Stability AI forbidden (check API key permissions): {detail}"
+    if code == 429:
+        return 429, f"Stability AI rate limited: {detail}"
+    if 400 <= code < 500:
+        return 400, f"Stable Fast 3D request rejected: {detail}"
+    return 502, f"Stable Fast 3D upstream error (HTTP {code}): {detail}"
+
+
+def png_data_url_to_glb_data_url(
+    data_url: str,
+) -> Tuple[str, Optional[Any], int, bool]:
+    """
+    POST image to Stability Stable Fast 3D (v2beta).
+    Returns (glb data URL, mesh_stats always None, glb_len, texture_applied True on success).
+    """
+    api_key = _resolve_stability_api_key()
+    if not api_key:
+        raise StableFast3DError(401, STABILITY_3D_SETUP_HINT)
+
     raw_png = _decode_data_url_png(data_url)
     try:
         flat_png = _png_rgba_flattened_on_white(raw_png)
     except Exception as e:
         logger.warning("PNG flatten failed, using raw bytes: %s", e)
         flat_png = raw_png
-    tmp_path = None
-    try:
-        fd, tmp_path = tempfile.mkstemp(suffix=".png")
-        try:
-            os.write(fd, flat_png)
-        finally:
-            os.close(fd)
-        from gradio_client import handle_file
+    flat_png = _ensure_png_min_side(flat_png)
 
-        client = get_hunyuan_client()
-        with _hunyuan_lock:
-            result = client.predict(
-                handle_file(tmp_path),
-                None,
-                None,
-                None,
-                None,
-                30,
-                5.0,
-                1234,
-                256,
-                False,
-                8000,
-                True,
-                api_name="/shape_generation",
+    files = {"image": ("input.png", flat_png, "image/png")}
+    form = _stability_sf3d_form_extras()
+
+    with _stability_lock:
+        try:
+            r = httpx.post(
+                STABILITY_SF3D_URL,
+                headers={"Authorization": f"Bearer {api_key}", "Accept": "*/*"},
+                files=files,
+                data=form,
+                timeout=httpx.Timeout(300.0, connect=30.0),
             )
-        file_data = _file_data_from_shape_result(result)
-        glb_bytes = _download_glb_from_space(client, file_data)
-        glb_b64 = base64.b64encode(glb_bytes).decode("ascii")
-        mesh_stats = result[2] if len(result) > 2 else None
-        return f"data:model/gltf-binary;base64,{glb_b64}", mesh_stats, len(glb_bytes)
-    finally:
-        if tmp_path:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+        except httpx.HTTPError as e:
+            raise StableFast3DError(502, f"Stable Fast 3D request failed: {e}") from e
+
+    if r.status_code != 200:
+        sc, msg = _format_stability_http_error(r)
+        raise StableFast3DError(sc, msg)
+
+    try:
+        glb_bytes = _glb_bytes_from_stability_response(r)
+    except ValueError as e:
+        raise StableFast3DError(502, str(e)) from e
+    if len(glb_bytes) < 100:
+        raise StableFast3DError(502, "downloaded GLB too small")
+    glb_b64 = base64.b64encode(glb_bytes).decode("ascii")
+    logger.info("Stable Fast 3D succeeded (%s bytes).", len(glb_bytes))
+    return (
+        f"data:model/gltf-binary;base64,{glb_b64}",
+        None,
+        len(glb_bytes),
+        True,
+    )
+
 
 @app.get("/")
 def read_root():
     return {
         "status": "ok",
         "message": "Voxelizer API running",
-        "huggingface_token_configured": _resolve_hf_token() is not None,
+        "stability_api_key_configured": _resolve_stability_api_key() is not None,
+        "stable_fast_3d_endpoint": STABILITY_SF3D_URL,
     }
 
 
@@ -364,13 +344,13 @@ def generate_image(req: GenerateRequest):
 def convert_extracts_to_3d(req: Convert3DRequest):
     if not req.items:
         raise HTTPException(status_code=400, detail="items must not be empty")
-    if not _resolve_hf_token():
-        raise HTTPException(status_code=401, detail=HF_3D_SETUP_HINT)
+    if not _resolve_stability_api_key():
+        raise HTTPException(status_code=401, detail=STABILITY_3D_SETUP_HINT)
     out_items = []
     try:
         for i, item in enumerate(req.items):
             try:
-                glb_url, mesh_stats, glb_len = png_data_url_to_glb_data_url(
+                glb_url, mesh_stats, glb_len, texture_applied = png_data_url_to_glb_data_url(
                     item.extracted_base64
                 )
                 out_items.append(
@@ -378,16 +358,21 @@ def convert_extracts_to_3d(req: Convert3DRequest):
                         "glb_base64": glb_url,
                         "mesh_stats": mesh_stats,
                         "glb_byte_length": glb_len,
+                        "texture_applied": texture_applied,
                     }
                 )
             except HTTPException:
                 raise
+            except StableFast3DError as e:
+                raise HTTPException(
+                    status_code=e.status_code,
+                    detail=f"3D conversion failed for asset {i + 1}: {e}",
+                ) from e
             except Exception as e:
                 logger.exception("convert-3d failed for item %s", i)
-                status, detail = _format_3d_upstream_error(e)
                 raise HTTPException(
-                    status_code=status,
-                    detail=f"3D conversion failed for asset {i + 1}: {detail}",
+                    status_code=502,
+                    detail=f"3D conversion failed for asset {i + 1}: {e}",
                 ) from e
         return {"status": "success", "items": out_items}
     except HTTPException:
