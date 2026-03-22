@@ -18,8 +18,12 @@ export type SidebarRightProps = {
   onToggleUnitySelect?: (id: number) => void;
   onSelectAllForUnity?: () => void;
   onSelectNoneForUnity?: () => void;
-  onImportSelectedToUnity?: () => void;
-  isUnityImporting?: boolean;
+  /** Import selected 2D PNG extracts to Unity (Sprites/). */
+  onImportPngToUnity?: () => void;
+  /** Import selected GLB models to Unity (Models/ + Prefabs/). */
+  onImportGlbToUnity?: () => void;
+  isUnityImportingPng?: boolean;
+  isUnityImportingGlb?: boolean;
   onConvertTo3D?: () => void;
   isConverting3D?: boolean;
 };
@@ -31,11 +35,19 @@ export default function SidebarRight({
   onToggleUnitySelect,
   onSelectAllForUnity,
   onSelectNoneForUnity,
-  onImportSelectedToUnity,
-  isUnityImporting,
+  onImportPngToUnity,
+  onImportGlbToUnity,
+  isUnityImportingPng,
+  isUnityImportingGlb,
   onConvertTo3D,
   isConverting3D,
 }: SidebarRightProps) {
+  const extracting = isExtracting ?? false;
+  const converting3d = isConverting3D ?? false;
+  const unityPng = isUnityImportingPng ?? false;
+  const unityGlb = isUnityImportingGlb ?? false;
+  const unityBusy = unityPng || unityGlb;
+
   const downloadAll = () => {
     extractedAssets.forEach((asset, i) => {
       const a = document.createElement('a');
@@ -47,16 +59,39 @@ export default function SidebarRight({
   };
 
   const selectedCount = selectedForUnityIds.length;
-  const hasImageAssets = extractedAssets.some((a) => a.kind !== 'glb');
-  const allGlb =
-    extractedAssets.length > 0 && extractedAssets.every((a) => a.kind === 'glb');
+  const selectedAssets = extractedAssets.filter((a) => selectedForUnityIds.includes(a.id));
+  const selectedPngCount = selectedAssets.filter((a) => a.kind !== 'glb').length;
+  const selectedGlbCount = selectedAssets.filter((a) => a.kind === 'glb').length;
 
   return (
     <aside className="panel panel-right">
-      <div className="panel-header">
-        <span>Extracted Assets</span>
+      <div className="panel-header" style={{ alignItems: 'flex-start' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', flex: 1, minWidth: 0 }}>
+          <span>Extracted Assets</span>
+          {extractedAssets.length > 0 && (
+            <span
+              style={{
+                fontSize: '0.65rem',
+                fontWeight: 400,
+                color: 'var(--text-secondary)',
+                textTransform: 'none',
+                lineHeight: 1.35,
+              }}
+            >
+              Convert and Import use <strong style={{ color: 'var(--text-primary)' }}>checked</strong> items only. Export All uses the full list.
+            </span>
+          )}
+        </div>
         {extractedAssets.length > 0 && (
-          <span style={{ display: 'flex', gap: '0.75rem', fontSize: '0.7rem', fontWeight: 500, textTransform: 'none' }}>
+          <span
+            style={{
+              display: 'flex',
+              gap: '0.75rem',
+              fontSize: '0.7rem',
+              fontWeight: 500,
+              textTransform: 'none',
+            }}
+          >
             <button
               type="button"
               onClick={onSelectAllForUnity}
@@ -89,11 +124,16 @@ export default function SidebarRight({
         )}
       </div>
       <div className="panel-content">
-        {extractedAssets.length === 0 && !isExtracting && (
+        {extractedAssets.length === 0 && !extracting && (
           <div style={{ textAlign: 'center', color: 'var(--text-secondary)', padding: '2rem 0' }}>
-            <Package size={32} style={{ marginBottom: '1rem', opacity: 0.5, marginLeft: 'auto', marginRight: 'auto' }} />
+            <Package
+              size={32}
+              style={{ marginBottom: '1rem', opacity: 0.5, marginLeft: 'auto', marginRight: 'auto' }}
+            />
             <p style={{ fontSize: '0.85rem' }}>No assets extracted yet.</p>
-            <p style={{ fontSize: '0.75rem', marginTop: '0.5rem', opacity: 0.7 }}>Draw a box over objects on the canvas to segment them.</p>
+            <p style={{ fontSize: '0.75rem', marginTop: '0.5rem', opacity: 0.7 }}>
+              Draw a box over objects on the canvas to segment them.
+            </p>
           </div>
         )}
 
@@ -136,10 +176,16 @@ export default function SidebarRight({
                   {isGlb ? (
                     <GlbModelPreview dataUrl={asset.url} name={asset.name} />
                   ) : (
-                    <img src={asset.url} alt="Extracted" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+                    <img
+                      src={asset.url}
+                      alt="Extracted"
+                      style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+                    />
                   )}
                 </div>
-                <div style={{ fontSize: '0.75rem', marginTop: '0.5rem', color: 'var(--text-secondary)' }}>{asset.name}</div>
+                <div style={{ fontSize: '0.75rem', marginTop: '0.5rem', color: 'var(--text-secondary)' }}>
+                  {asset.name}
+                </div>
                 {isGlb && (
                   <div
                     style={{
@@ -155,7 +201,7 @@ export default function SidebarRight({
               </div>
             );
           })}
-          {isExtracting && (
+          {extracting && (
             <div
               style={{
                 border: '1px solid var(--accent)',
@@ -175,48 +221,70 @@ export default function SidebarRight({
           )}
         </div>
       </div>
-      <div style={{ padding: '1rem', borderTop: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+      <div
+        style={{
+          padding: '1rem',
+          borderTop: '1px solid var(--border-color)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '0.5rem',
+        }}
+      >
         <button
           type="button"
           onClick={onConvertTo3D}
           disabled={
             extractedAssets.length === 0 ||
-            !hasImageAssets ||
-            isConverting3D ||
-            isExtracting
+            selectedPngCount === 0 ||
+            converting3d ||
+            extracting
           }
+          title="Converts only the selected 2D PNG extracts into GLB models."
         >
-          {isConverting3D ? (
-            <Loader2 className="animate-spin" size={16} />
-          ) : (
-            <Box size={16} />
-          )}
-          {isConverting3D ? 'Converting to 3D…' : 'Convert to 3D'}
+          {converting3d ? <Loader2 className="animate-spin" size={16} /> : <Box size={16} />}
+          {converting3d
+            ? 'Converting to 3D...'
+            : `Convert to 3D${selectedPngCount > 0 ? ` (${selectedPngCount})` : ''}`}
         </button>
         <button
           type="button"
-          onClick={onImportSelectedToUnity}
+          onClick={onImportPngToUnity}
           disabled={
             extractedAssets.length === 0 ||
             selectedCount === 0 ||
-            isUnityImporting ||
-            allGlb
+            selectedPngCount === 0 ||
+            unityBusy
           }
-          title={allGlb ? 'Unity import expects 2D PNG extracts. Export GLB files below.' : undefined}
+          title="Imports selected 2D PNG extracts via the backend to Unity (Sprites folder)."
         >
-          {isUnityImporting ? (
-            <Loader2 className="animate-spin" size={16} />
-          ) : (
-            <Upload size={16} />
-          )}
-          {isUnityImporting
-            ? 'Importing to Unity…'
-            : allGlb
-              ? 'Unity import (PNG only)'
-              : `Import selected to Unity${selectedCount > 0 ? ` (${selectedCount})` : ''}`}
+          {unityPng ? <Loader2 className="animate-spin" size={16} /> : <Upload size={16} />}
+          {unityPng
+            ? 'Importing PNGs...'
+            : `Import PNGs to Unity${selectedPngCount > 0 ? ` (${selectedPngCount})` : ''}`}
         </button>
-        <button type="button" onClick={downloadAll} disabled={extractedAssets.length === 0}>
-          <Download size={16} /> Export All{allGlb ? ' (GLB)' : ' (PNGs)'}
+        <button
+          type="button"
+          onClick={onImportGlbToUnity}
+          disabled={
+            extractedAssets.length === 0 ||
+            selectedCount === 0 ||
+            selectedGlbCount === 0 ||
+            unityBusy
+          }
+          title="Imports selected GLB models via the backend to Unity (Models + Prefabs)."
+        >
+          {unityGlb ? <Loader2 className="animate-spin" size={16} /> : <Box size={16} />}
+          {unityGlb
+            ? 'Importing GLB...'
+            : `Import GLB to Unity${selectedGlbCount > 0 ? ` (${selectedGlbCount})` : ''}`}
+        </button>
+        <button
+          type="button"
+          onClick={downloadAll}
+          disabled={extractedAssets.length === 0}
+          title="Downloads every asset in the list (not limited to checked items)."
+        >
+          <Download size={16} /> Export All
         </button>
       </div>
     </aside>
