@@ -1,8 +1,16 @@
 'use client';
-import { Download, Package, Loader2, Upload } from 'lucide-react';
+import GlbModelPreview from '@/components/GlbModelPreview';
+import { Download, Package, Loader2, Upload, Box } from 'lucide-react';
+
+export type WorkspaceAsset = {
+  id: number;
+  url: string;
+  name: string;
+  kind?: 'image' | 'glb';
+};
 
 export type SidebarRightProps = {
-  extractedAssets?: { id: number; url: string; name: string }[];
+  extractedAssets?: WorkspaceAsset[];
   isExtracting?: boolean;
   selectedForUnityIds?: number[];
   onToggleUnitySelect?: (id: number) => void;
@@ -10,6 +18,8 @@ export type SidebarRightProps = {
   onSelectNoneForUnity?: () => void;
   onImportSelectedToUnity?: () => void;
   isUnityImporting?: boolean;
+  onConvertTo3D?: () => void;
+  isConverting3D?: boolean;
 };
 
 export default function SidebarRight({
@@ -21,17 +31,23 @@ export default function SidebarRight({
   onSelectNoneForUnity,
   onImportSelectedToUnity,
   isUnityImporting,
+  onConvertTo3D,
+  isConverting3D,
 }: SidebarRightProps) {
   const downloadAll = () => {
     extractedAssets.forEach((asset, i) => {
       const a = document.createElement('a');
       a.href = asset.url;
-      a.download = `extracted_obj_${i}.png`;
+      const ext = asset.kind === 'glb' ? 'glb' : 'png';
+      a.download = `extracted_obj_${i}.${ext}`;
       a.click();
     });
   };
 
   const selectedCount = selectedForUnityIds.length;
+  const hasImageAssets = extractedAssets.some((a) => a.kind !== 'glb');
+  const allGlb =
+    extractedAssets.length > 0 && extractedAssets.every((a) => a.kind === 'glb');
 
   return (
     <aside className="panel panel-right">
@@ -80,8 +96,9 @@ export default function SidebarRight({
         )}
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
-          {extractedAssets.map((asset: any) => {
+          {extractedAssets.map((asset) => {
             const checked = selectedForUnityIds.includes(asset.id);
+            const isGlb = asset.kind === 'glb';
             return (
               <div
                 key={asset.id}
@@ -113,7 +130,13 @@ export default function SidebarRight({
                     style={{ width: '1rem', height: '1rem', accentColor: 'var(--accent)' }}
                   />
                 </label>
-                <img src={asset.url} alt="Extracted" style={{ width: '100%', height: '80px', objectFit: 'contain' }} />
+                <div style={{ width: '100%', height: '120px', marginTop: '0.25rem' }}>
+                  {isGlb ? (
+                    <GlbModelPreview dataUrl={asset.url} name={asset.name} />
+                  ) : (
+                    <img src={asset.url} alt="Extracted" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+                  )}
+                </div>
                 <div style={{ fontSize: '0.75rem', marginTop: '0.5rem', color: 'var(--text-secondary)' }}>{asset.name}</div>
               </div>
             );
@@ -141,8 +164,31 @@ export default function SidebarRight({
       <div style={{ padding: '1rem', borderTop: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
         <button
           type="button"
+          onClick={onConvertTo3D}
+          disabled={
+            extractedAssets.length === 0 ||
+            !hasImageAssets ||
+            isConverting3D ||
+            isExtracting
+          }
+        >
+          {isConverting3D ? (
+            <Loader2 className="animate-spin" size={16} />
+          ) : (
+            <Box size={16} />
+          )}
+          {isConverting3D ? 'Converting to 3D…' : 'Convert to 3D'}
+        </button>
+        <button
+          type="button"
           onClick={onImportSelectedToUnity}
-          disabled={extractedAssets.length === 0 || selectedCount === 0 || isUnityImporting}
+          disabled={
+            extractedAssets.length === 0 ||
+            selectedCount === 0 ||
+            isUnityImporting ||
+            allGlb
+          }
+          title={allGlb ? 'Unity import expects 2D PNG extracts. Export GLB files below.' : undefined}
         >
           {isUnityImporting ? (
             <Loader2 className="animate-spin" size={16} />
@@ -151,10 +197,12 @@ export default function SidebarRight({
           )}
           {isUnityImporting
             ? 'Importing to Unity…'
-            : `Import selected to Unity${selectedCount > 0 ? ` (${selectedCount})` : ''}`}
+            : allGlb
+              ? 'Unity import (PNG only)'
+              : `Import selected to Unity${selectedCount > 0 ? ` (${selectedCount})` : ''}`}
         </button>
         <button type="button" onClick={downloadAll} disabled={extractedAssets.length === 0}>
-          <Download size={16} /> Export All (PNGs)
+          <Download size={16} /> Export All{allGlb ? ' (GLB)' : ' (PNGs)'}
         </button>
       </div>
     </aside>
